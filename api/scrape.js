@@ -37,6 +37,17 @@ function findTenderRows(payload, baseUrl, max) {
   }).filter(item => item.id && /konstruksi|pembangunan|rehabilitasi|jalan|drainase|gedung|irigasi/i.test(item.label)).slice(0, max);
 }
 
+function findInaprocTenderRows(html, max) {
+  // Halaman publik SPSE nasional merender satu paket per baris tabel.
+  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(match => {
+    const raw = match[1];
+    const text = clean(raw);
+    const id = raw.match(/(?:lelang|evaluasi)\/(\d{8,})/i)?.[1] || text.match(/\b(\d{8,})\b/)?.[1];
+    return { id, label: text };
+  });
+  return rows.filter(row => row.id && /pekerjaan konstruksi|konstruksi/i.test(row.label)).slice(0, max);
+}
+
 function extractWinner(html) {
   const text = clean(html);
   // Pada SPSE, label tabel berada sebelum nilai; cari badan usaha yang diikuti alamat.
@@ -56,10 +67,18 @@ export default {
     for (const source of sources) {
       try {
         const baseUrl = eprocBase(source.baseUrl);
-        // SPSE memuat tabel tender melalui endpoint DataTables, bukan HTML beranda.
-        const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), 'search[value]': '' });
-        const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
-        const tenders = findTenderRows(JSON.parse(listing), baseUrl, limit);
+        let tenders;
+        if (new URL(baseUrl).hostname === 'spse.inaproc.id') {
+          // SPSE nasional baru: kategoriId=2 adalah Pekerjaan Konstruksi.
+          const year = new Date().getFullYear();
+          const listingUrl = `${baseUrl}/lelang?kategoriId=2&tahun=${year}&instansiId=&rekanan=&kontrak_status=&kontrak_type=`;
+          const listing = await getPublicPage(listingUrl);
+          tenders = findInaprocTenderRows(listing, limit);
+        } else {
+          const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), 'search[value]': '' });
+          const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
+          tenders = findTenderRows(JSON.parse(listing), baseUrl, limit);
+        }
         for (const tender of tenders) {
           await wait(850); // rate limit per portal
           try {
