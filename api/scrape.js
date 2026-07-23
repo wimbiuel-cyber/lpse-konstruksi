@@ -21,6 +21,20 @@ async function getPublicPage(url) {
   return response.text();
 }
 
+async function postPublicForm(url, fields) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'user-agent': 'KontrakKepri/1.0 (public procurement research; contact: admin@example.invalid)'
+    },
+    body: new URLSearchParams(fields),
+    signal: AbortSignal.timeout(15_000)
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.text();
+}
+
 function eprocBase(url) {
   const parsed = new URL(url);
   // Portal SPSE nasional baru tidak memakai prefix /eproc4.
@@ -69,11 +83,18 @@ export default {
         const baseUrl = eprocBase(source.baseUrl);
         let tenders;
         if (new URL(baseUrl).hostname === 'spse.inaproc.id') {
-          // SPSE nasional baru: kategoriId=2 adalah Pekerjaan Konstruksi.
+          // SPSE nasional baru: tabel dimuat melalui POST DataTables dengan token halaman.
           const year = new Date().getFullYear();
           const listingUrl = `${baseUrl}/lelang?kategoriId=2&tahun=${year}&instansiId=&rekanan=&kontrak_status=&kontrak_type=`;
-          const listing = await getPublicPage(listingUrl);
-          tenders = findInaprocTenderRows(listing, limit);
+          const listingPage = await getPublicPage(listingUrl);
+          const token = listingPage.match(/authenticityToken\s*=\s*'([^']+)'/)?.[1];
+          const route = listingPage.match(/url\s*:\s*"([^"\n]*\/dt\/lelang[^"\n]*)"/)?.[1];
+          if (!token || !route) throw new Error('Endpoint tabel SPSE tidak ditemukan');
+          const tableUrl = new URL(route, baseUrl).toString();
+          const payload = await postPublicForm(tableUrl, {
+            draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), authenticityToken: token
+          });
+          tenders = findTenderRows(JSON.parse(payload), baseUrl, limit);
         } else {
           const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), 'search[value]': '' });
           const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
