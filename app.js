@@ -21,13 +21,14 @@ document.querySelectorAll('.source-card input').forEach(x=>x.addEventListener('c
 $('#resetBtn').onclick=()=>{$('#keyword').value='';$('#city').value='all';$('#period').value='all';document.querySelectorAll('.source-card input').forEach(x=>{x.checked=true;x.closest('.source-card').classList.add('active')});render()};
 $('#refreshBtn').onclick=async()=>{
  const button=$('#refreshBtn'); button.disabled=true; button.innerHTML='<span>◌</span> Mengambil halaman publik…';
+ companies=[]; render();
  try {
   const sources=[...document.querySelectorAll('.source-card input:checked')].map(input=>({name:input.value,baseUrl:input.closest('.source-card').querySelector('a').href}));
   const response=await fetch('/api/scrape',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sources,limit:10})});
   if(!response.ok) throw new Error('Endpoint scraper belum tersedia');
   const payload=await response.json();
   if(payload.data?.length){companies=payload.data.map(row=>({name:row.company,city:'Perlu verifikasi',address:'Lihat paket sumber',work:row.package,source:row.source,year:new Date(row.fetchedAt).getFullYear().toString(),url:row.sourceUrl}));render();toast(`${companies.length} perusahaan ditemukan dari halaman publik.`)}
-  else toast('Tidak ada pemenang yang dapat diekstrak. Periksa log server atau portal sumber.');
+  else toast('Belum ada pemenang yang terbaca. Coba lagi beberapa saat atau periksa log server.');
  }catch(error){toast('Scraper belum terhubung. Jalankan via Vercel atau gunakan endpoint /api/scrape.');}
  finally{button.disabled=false;button.innerHTML='<span>↻</span> Ambil data terbaru';}
 };
