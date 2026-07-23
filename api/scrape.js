@@ -21,16 +21,23 @@ async function getPublicPage(url) {
   return response.text();
 }
 
-function findTenderLinks(html, baseUrl, max) {
-  const links = [...html.matchAll(/<a[^>]+href=["']([^"']*(?:lelang|tender)[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi)]
-    .map(match => ({ url: absolute(baseUrl, match[1]), label: clean(match[2]) }))
-    .filter(item => /konstruksi|pembangunan|rehabilitasi|jalan|drainase/i.test(item.label));
-  return [...new Map(links.map(item => [item.url, item])).values()].slice(0, max);
+function eprocBase(url) {
+  const parsed = new URL(url);
+  return parsed.pathname.includes('/eproc4') ? `${parsed.origin}/eproc4` : `${parsed.origin}/eproc4`;
+}
+
+function findTenderRows(payload, baseUrl, max) {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  return rows.map(row => {
+    const html = Array.isArray(row) ? row.join(' ') : JSON.stringify(row);
+    const id = html.match(/(?:lelang|evaluasi)\/(\d+)/i)?.[1] || html.match(/\b(\d{5,})\b/)?.[1];
+    return { id, label: clean(html), raw: html };
+  }).filter(item => item.id && /konstruksi|pembangunan|rehabilitasi|jalan|drainase|gedung|irigasi/i.test(item.label)).slice(0, max);
 }
 
 function extractWinner(html) {
   const text = clean(html);
-  const match = text.match(/(?:pemenang|nama penyedia)\s*[:\-]?\s*([A-Z][A-Z0-9 .,&()'\/-]{4,100})/i);
+  const match = text.match(/(?:nama pemenang|pemenang|nama penyedia)\s*[:\-]?\s*([A-Z][A-Z0-9 .,&()'\/-]{4,100})/i);
   return match ? match[1].trim() : null;
 }
 
@@ -41,14 +48,18 @@ export default async function handler(req, res) {
   const results = [], logs = [];
   for (const source of sources) {
     try {
-      const homepage = await getPublicPage(source.baseUrl);
-      const tenders = findTenderLinks(homepage, source.baseUrl, limit);
+      const baseUrl = eprocBase(source.baseUrl);
+      // SPSE memuat tabel tender melalui endpoint DataTables, bukan HTML beranda.
+      const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 3, 20)), 'search[value]': '' });
+      const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
+      const tenders = findTenderRows(JSON.parse(listing), baseUrl, limit);
       for (const tender of tenders) {
         await wait(850); // rate limit per portal
         try {
-          const detail = await getPublicPage(tender.url);
+          const detailUrl = `${baseUrl}/evaluasi/${tender.id}/pemenangberkontrak`;
+          const detail = await getPublicPage(detailUrl);
           const company = extractWinner(detail);
-          if (company) results.push({ company, package: tender.label, source: source.name, sourceUrl: tender.url, fetchedAt: new Date().toISOString() });
+          if (company) results.push({ company, package: tender.label, source: source.name, sourceUrl: detailUrl, fetchedAt: new Date().toISOString() });
         } catch { /* skip inaccessible individual public page */ }
       }
       logs.push({ source: source.name, status: 'ok', packagesChecked: tenders.length });
