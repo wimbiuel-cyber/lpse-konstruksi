@@ -1,83 +1,36 @@
-/**
- * Vercel serverless endpoint for public LPSE pages.
- * POST { sources: [{name, baseUrl}], limit?: number }
- * This is intentionally conservative: no login, CAPTCHA bypass, or retries.
- */
-const DEFAULT_SOURCES = [
-  { name: 'LPSE Kota Tanjungpinang', baseUrl: 'https://lpse.tanjungpinangkota.go.id/eproc4' },
-  { name: 'LPSE Kota Batam', baseUrl: 'https://lpsekotabatam.com' },
-  { name: 'LPSE Provinsi Kepulauan Riau', baseUrl: 'https://lpse.kepriprov.go.id/eproc4' }
+let companies = [
+  { name:'PT Cipta Karya Tanjungpinang', city:'Tanjungpinang', address:'Bukit Bestari, Tanjungpinang', work:'Rehabilitasi Gedung Pemerintah', source:'LPSE Kota Tanjungpinang', year:'2025', url:'https://lpse.tanjungpinangkota.go.id/eproc4' },
+  { name:'CV Tunas Bahari Konstruksi', city:'Tanjungpinang', address:'Tanjungpinang Timur', work:'Pembangunan Drainase Lingkungan', source:'LPSE Kota Tanjungpinang', year:'2025', url:'https://lpse.tanjungpinangkota.go.id/eproc4' },
+  { name:'PT Bintang Samudra Persada', city:'Batam', address:'Batam Kota, Batam', work:'Peningkatan Jalan Lingkungan', source:'LPSE Kota Batam', year:'2026', url:'https://lpsekotabatam.com/' },
+  { name:'CV Anugerah Mitra Utama', city:'Tanjungpinang', address:'Tanjungpinang Barat', work:'Pembangunan Sarana Air Bersih', source:'LPSE Provinsi Kepulauan Riau', year:'2025', url:'https://lpse.kepriprov.go.id/eproc4' },
+  { name:'PT Artha Konstruksi Kepri', city:'Batam', address:'Sekupang, Batam', work:'Pemeliharaan Berkala Jalan', source:'LPSE Provinsi Kepulauan Riau', year:'2024', url:'https://lpse.kepriprov.go.id/eproc4' },
+  { name:'CV Cemerlang Karya Mandiri', city:'Tanjungpinang', address:'Tanjungpinang Kota', work:'Pembangunan Bangunan Gedung', source:'LPSE Kota Tanjungpinang', year:'2024', url:'https://lpse.tanjungpinangkota.go.id/eproc4' }
 ];
-const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-const clean = text => text.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-const absolute = (base, href) => new URL(href, base).toString();
-
-async function getPublicPage(url) {
-  const response = await fetch(url, {
-    headers: { 'user-agent': 'KontrakKepri/1.0 (public procurement research; contact: admin@example.invalid)' },
-    signal: AbortSignal.timeout(15_000)
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.text();
+const $ = s => document.querySelector(s);
+let filtered = [...companies];
+function selectedSources(){return [...document.querySelectorAll('.source-card input:checked')].map(x=>x.value)}
+function render(){
+ const key=$('#keyword').value.toLowerCase(), city=$('#city').value, year=$('#period').value, sources=selectedSources();
+ filtered=companies.filter(c=>sources.includes(c.source)&&(!key||Object.values(c).join(' ').toLowerCase().includes(key))&&(city==='all'||(city==='other'?!['Tanjungpinang','Batam'].includes(c.city):c.city.toLowerCase()===city))&&(year==='all'||c.year===year));
+ $('#companyRows').innerHTML=filtered.map(c=>`<tr><td><span class="company">${c.name}</span><span class="detail">${c.address}</span></td><td>${c.city}</td><td>${c.work}<span class="detail"><span class="tag">KONSTRUKSI</span></span></td><td class="source">${c.source}</td><td>${c.year}</td><td><a class="link" href="${c.url}" target="_blank" rel="noreferrer" title="Lihat sumber">↗</a></td></tr>`).join('');
+ $('#count').textContent=filtered.length; $('#empty').hidden=filtered.length>0; $('#sourceCount').textContent=sources.length; $('#locationCount').textContent=new Set(filtered.map(c=>c.city)).size; $('#latestDate').textContent=filtered.length?Math.max(...filtered.map(c=>c.year)):'—';
 }
-
-function eprocBase(url) {
-  const parsed = new URL(url);
-  // Portal SPSE nasional baru tidak memakai prefix /eproc4.
-  if (parsed.hostname === 'spse.inaproc.id') return `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`;
-  return `${parsed.origin}/eproc4`;
-}
-
-function findTenderRows(payload, baseUrl, max) {
-  const rows = Array.isArray(payload?.data) ? payload.data : [];
-  return rows.map(row => {
-    const html = Array.isArray(row) ? row.join(' ') : JSON.stringify(row);
-    const id = html.match(/(?:lelang|evaluasi)\/(\d+)/i)?.[1] || html.match(/\b(\d{5,})\b/)?.[1];
-    return { id, label: clean(html), raw: html };
-  }).filter(item => item.id && /konstruksi|pembangunan|rehabilitasi|jalan|drainase|gedung|irigasi/i.test(item.label)).slice(0, max);
-}
-
-function extractWinner(html) {
-  const text = clean(html);
-  // Pada SPSE, label tabel berada sebelum nilai; cari badan usaha yang diikuti alamat.
-  const company = text.match(/\b((?:CV|PT)\.\s*[A-Z][A-Z0-9 .,&()'\/-]{2,90}?)(?=\s+(?:JL\.?|JALAN|RT\/?RW|KOMP\.?|DS\.?|KEL\.?))/i);
-  if (company) return company[1].trim();
-  const fallback = text.match(/\b((?:CV|PT)\.\s*[A-Z][A-Z0-9 .,&()'\/-]{2,70})/i);
-  return fallback ? fallback[1].trim() : null;
-}
-
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Gunakan POST.' });
-  const sources = Array.isArray(req.body?.sources) ? req.body.sources : DEFAULT_SOURCES;
-  const limit = Math.min(Math.max(Number(req.body?.limit) || 10, 1), 20);
-  const results = [], logs = [];
-  for (const source of sources) {
-    try {
-      const baseUrl = eprocBase(source.baseUrl);
-      // SPSE memuat tabel tender melalui endpoint DataTables, bukan HTML beranda.
-      const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), 'search[value]': '' });
-      const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
-      const tenders = findTenderRows(JSON.parse(listing), baseUrl, limit);
-      for (const tender of tenders) {
-        await wait(850); // rate limit per portal
-        try {
-          // Pemenang belum tentu sudah berkontrak; cek keduanya.
-          const winnerUrl = `${baseUrl}/evaluasi/${tender.id}/pemenang`;
-          let detail = await getPublicPage(winnerUrl);
-          let company = extractWinner(detail);
-          let sourceUrl = winnerUrl;
-          if (!company) {
-            sourceUrl = `${baseUrl}/evaluasi/${tender.id}/pemenangberkontrak`;
-            detail = await getPublicPage(sourceUrl);
-            company = extractWinner(detail);
-          }
-          if (company) results.push({ company, package: tender.label, source: source.name, sourceUrl, fetchedAt: new Date().toISOString() });
-        } catch { /* skip inaccessible individual public page */ }
-      }
-      logs.push({ source: source.name, status: 'ok', packagesChecked: tenders.length });
-    } catch (error) { logs.push({ source: source.name, status: 'failed', message: error.message }); }
-  }
-  const unique = [...new Map(results.map(row => [`${row.company}|${row.sourceUrl}`, row])).values()];
-  res.setHeader('Cache-Control', 'no-store');
-  return res.status(200).json({ data: unique, logs });
-}
+function toast(message){const x=$('#toast');x.textContent=message;x.classList.add('show');setTimeout(()=>x.classList.remove('show'),3600)}
+document.querySelectorAll('.source-card input').forEach(x=>x.addEventListener('change',()=>{x.closest('.source-card').classList.toggle('active',x.checked);render()}));
+['#keyword','#city','#period'].forEach(s=>$(s).addEventListener(s==='#keyword'?'input':'change',render));
+$('#resetBtn').onclick=()=>{$('#keyword').value='';$('#city').value='all';$('#period').value='all';document.querySelectorAll('.source-card input').forEach(x=>{x.checked=true;x.closest('.source-card').classList.add('active')});render()};
+$('#refreshBtn').onclick=async()=>{
+ const button=$('#refreshBtn'); button.disabled=true; button.innerHTML='<span>◌</span> Mengambil halaman publik…';
+ companies=[]; render();
+ try {
+  const sources=[...document.querySelectorAll('.source-card input:checked')].map(input=>({name:input.value,baseUrl:input.closest('.source-card').querySelector('a').href}));
+  const response=await fetch('/api/scrape',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sources,limit:10})});
+  if(!response.ok) throw new Error('Endpoint scraper belum tersedia');
+  const payload=await response.json();
+  if(payload.data?.length){companies=payload.data.map(row=>({name:row.company,city:'Perlu verifikasi',address:'Lihat paket sumber',work:row.package,source:row.source,year:new Date(row.fetchedAt).getFullYear().toString(),url:row.sourceUrl}));render();toast(`${companies.length} perusahaan ditemukan dari halaman publik.`)}
+  else toast('Belum ada pemenang yang terbaca. Coba lagi beberapa saat atau periksa log server.');
+ }catch(error){toast('Scraper belum terhubung. Jalankan via Vercel atau gunakan endpoint /api/scrape.');}
+ finally{button.disabled=false;button.innerHTML='<span>↻</span> Ambil data terbaru';}
+};
+$('#exportBtn').onclick=()=>{const header=['Perusahaan','Domisili','Alamat','Paket','Sumber','Tahun'];const csv=[header,...filtered.map(c=>[c.name,c.city,c.address,c.work,c.source,c.year])].map(r=>r.map(v=>'"'+v.replaceAll('"','""')+'"').join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='perusahaan-konstruksi-kepri.csv';a.click();URL.revokeObjectURL(a.href);toast(`${filtered.length} baris diekspor ke CSV.`)};
+$('#aboutBtn').onclick=()=>$('#aboutDialog').showModal();$('#closeAbout').onclick=()=>$('#aboutDialog').close();render();
