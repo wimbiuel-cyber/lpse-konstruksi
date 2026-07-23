@@ -23,7 +23,9 @@ async function getPublicPage(url) {
 
 function eprocBase(url) {
   const parsed = new URL(url);
-  return parsed.pathname.includes('/eproc4') ? `${parsed.origin}/eproc4` : `${parsed.origin}/eproc4`;
+  // Portal SPSE nasional baru tidak memakai prefix /eproc4.
+  if (parsed.hostname === 'spse.inaproc.id') return `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`;
+  return `${parsed.origin}/eproc4`;
 }
 
 function findTenderRows(payload, baseUrl, max) {
@@ -37,8 +39,11 @@ function findTenderRows(payload, baseUrl, max) {
 
 function extractWinner(html) {
   const text = clean(html);
-  const match = text.match(/(?:nama pemenang|pemenang|nama penyedia)\s*[:\-]?\s*([A-Z][A-Z0-9 .,&()'\/-]{4,100})/i);
-  return match ? match[1].trim() : null;
+  // Pada SPSE, label tabel berada sebelum nilai; cari badan usaha yang diikuti alamat.
+  const company = text.match(/\b((?:CV|PT)\.\s*[A-Z][A-Z0-9 .,&()'\/-]{2,90}?)(?=\s+(?:JL\.?|JALAN|RT\/?RW|KOMP\.?|DS\.?|KEL\.?))/i);
+  if (company) return company[1].trim();
+  const fallback = text.match(/\b((?:CV|PT)\.\s*[A-Z][A-Z0-9 .,&()'\/-]{2,70})/i);
+  return fallback ? fallback[1].trim() : null;
 }
 
 export default async function handler(req, res) {
@@ -50,16 +55,23 @@ export default async function handler(req, res) {
     try {
       const baseUrl = eprocBase(source.baseUrl);
       // SPSE memuat tabel tender melalui endpoint DataTables, bukan HTML beranda.
-      const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 3, 20)), 'search[value]': '' });
+      const query = new URLSearchParams({ draw: '1', start: '0', length: String(Math.max(limit * 4, 40)), 'search[value]': '' });
       const listing = await getPublicPage(`${baseUrl}/dt/lelang?${query}`);
       const tenders = findTenderRows(JSON.parse(listing), baseUrl, limit);
       for (const tender of tenders) {
         await wait(850); // rate limit per portal
         try {
-          const detailUrl = `${baseUrl}/evaluasi/${tender.id}/pemenangberkontrak`;
-          const detail = await getPublicPage(detailUrl);
-          const company = extractWinner(detail);
-          if (company) results.push({ company, package: tender.label, source: source.name, sourceUrl: detailUrl, fetchedAt: new Date().toISOString() });
+          // Pemenang belum tentu sudah berkontrak; cek keduanya.
+          const winnerUrl = `${baseUrl}/evaluasi/${tender.id}/pemenang`;
+          let detail = await getPublicPage(winnerUrl);
+          let company = extractWinner(detail);
+          let sourceUrl = winnerUrl;
+          if (!company) {
+            sourceUrl = `${baseUrl}/evaluasi/${tender.id}/pemenangberkontrak`;
+            detail = await getPublicPage(sourceUrl);
+            company = extractWinner(detail);
+          }
+          if (company) results.push({ company, package: tender.label, source: source.name, sourceUrl, fetchedAt: new Date().toISOString() });
         } catch { /* skip inaccessible individual public page */ }
       }
       logs.push({ source: source.name, status: 'ok', packagesChecked: tenders.length });
